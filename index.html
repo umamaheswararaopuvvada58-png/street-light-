@@ -1,1408 +1,762 @@
-#include <WiFi.h>
-#include <Firebase_ESP_Client.h>
-
-// =====================================================
-// WIFI
-// =====================================================
-
-#define WIFI_SSID     "iPhone"
-#define WIFI_PASSWORD "12345678"
-
-
-// =====================================================
-// FIREBASE
-// =====================================================
-
-#define API_KEY "AIzaSyAE5cxCHExRfcfeqPYvgAI1GxXs6tznmi"
-
-#define DATABASE_URL \
-"https://street-light-c4fc1-default-rtdb.asia-southeast1.firebasedatabase.app"
-
-// Firebase Database Secret
-#define DATABASE_SECRET \
-"nBzqPi0iOh4F3oTXoF1ltY3Ou0cB3tpJ2vUf8jI7"
-
-
-// =====================================================
-// FIREBASE OBJECTS
-// =====================================================
-
-FirebaseData fbdo;
-
-FirebaseAuth auth;
-
-FirebaseConfig config;
-
-
-// =====================================================
-// PIN CONFIGURATION
-// =====================================================
-
-// IR sensors
-#define IR1_PIN 34
-#define IR2_PIN 35
-
-// LEDs
-#define LED1_PIN 25
-#define LED2_PIN 26
-
-// Buzzer
-#define BUZZER_PIN 27
-
-// Accident / emergency button
-#define ACCIDENT_BUTTON_PIN 33
-
-
-// =====================================================
-// PWM CONFIGURATION
-// =====================================================
-
-#define LED1_CHANNEL 0
-#define LED2_CHANNEL 1
-
-#define PWM_FREQ 5000
-#define PWM_RESOLUTION 8
-
-
-// =====================================================
-// SENSOR DISTANCE
-// =====================================================
-
-// Distance between IR1 and IR2
-// Example: 10 cm = 0.10 m
-
-float sensorDistance = 0.10;
-
-
-// =====================================================
-// SPEED VARIABLES
-// =====================================================
-
-unsigned long sensor1Time = 0;
-unsigned long sensor2Time = 0;
-
-bool sensor1Triggered = false;
-bool sensor2Triggered = false;
-
-
-// =====================================================
-// CURRENT DATA VARIABLES
-// =====================================================
-
-float currentSpeedKMH = 0.0;
-float currentSpeedMS = 0.0;
-
-int currentBrightness = 0;
-
-unsigned long currentTimeDifference = 0;
-
-
-// =====================================================
-// ACCIDENT BUTTON VARIABLES
-// =====================================================
-
-bool accidentMode = false;
-
-bool lastButtonState = HIGH;
-
-unsigned long lastButtonTime = 0;
-
-const unsigned long debounceTime = 300;
-
-
-// =====================================================
-// LIVE FIREBASE UPDATE TIMER
-// =====================================================
-
-unsigned long lastFirebaseUpdate = 0;
-
-const unsigned long firebaseUpdateInterval = 2000;
-
-
-// =====================================================
-// FUNCTION: SET LED BRIGHTNESS
-// =====================================================
-
-void setLights(int brightness)
-{
-  ledcWrite(
-    LED1_CHANNEL,
-    brightness
-  );
-
-  ledcWrite(
-    LED2_CHANNEL,
-    brightness
-  );
-}
-
-
-// =====================================================
-// FUNCTION: SAVE LIVE DATA
-// =====================================================
-
-void saveLiveData()
-{
-  int ir1 = digitalRead(IR1_PIN);
-  int ir2 = digitalRead(IR2_PIN);
-
-  bool vehicleDetected =
-    (ir1 == LOW || ir2 == LOW);
-
-
-  // IR 1
-  Firebase.RTDB.setInt(
-    &fbdo,
-    "/street_light/live/ir1",
-    ir1
-  );
-
-
-  // IR 2
-  Firebase.RTDB.setInt(
-    &fbdo,
-    "/street_light/live/ir2",
-    ir2
-  );
-
-
-  // Speed KM/H
-  Firebase.RTDB.setFloat(
-    &fbdo,
-    "/street_light/live/speed_kmh",
-    currentSpeedKMH
-  );
-
-
-  // Speed M/S
-  Firebase.RTDB.setFloat(
-    &fbdo,
-    "/street_light/live/speed_ms",
-    currentSpeedMS
-  );
-
-
-  // Brightness
-  Firebase.RTDB.setInt(
-    &fbdo,
-    "/street_light/live/brightness",
-    currentBrightness
-  );
-
-
-  // Vehicle detected
-  Firebase.RTDB.setBool(
-    &fbdo,
-    "/street_light/live/vehicle_detected",
-    vehicleDetected
-  );
-
-
-  // Accident mode
-  Firebase.RTDB.setBool(
-    &fbdo,
-    "/street_light/live/accident_alert",
-    accidentMode
-  );
-
-
-  // Time difference
-  Firebase.RTDB.setInt(
-    &fbdo,
-    "/street_light/live/time_difference_ms",
-    currentTimeDifference
-  );
-
-
-  // Sensor distance
-  Firebase.RTDB.setFloat(
-    &fbdo,
-    "/street_light/live/sensor_distance",
-    sensorDistance
-  );
-
-
-  // Uptime
-  Firebase.RTDB.setInt(
-    &fbdo,
-    "/street_light/live/uptime_ms",
-    millis()
-  );
-
-
-  // Status
-  if (accidentMode)
-  {
-    Firebase.RTDB.setString(
-      &fbdo,
-      "/street_light/live/status",
-      "ACCIDENT_ALERT"
-    );
-  }
-  else if (vehicleDetected)
-  {
-    Firebase.RTDB.setString(
-      &fbdo,
-      "/street_light/live/status",
-      "VEHICLE_DETECTED"
-    );
-  }
-  else
-  {
-    Firebase.RTDB.setString(
-      &fbdo,
-      "/street_light/live/status",
-      "WAITING"
-    );
-  }
-}
-
-
-// =====================================================
-// FUNCTION: SAVE VEHICLE HISTORY
-// =====================================================
-
-void saveVehicleHistory()
-{
-  FirebaseJson json;
-
-
-  json.set(
-    "speed_kmh",
-    currentSpeedKMH
-  );
-
-
-  json.set(
-    "speed_ms",
-    currentSpeedMS
-  );
-
-
-  json.set(
-    "brightness",
-    currentBrightness
-  );
-
-
-  json.set(
-    "time_difference_ms",
-    (int)currentTimeDifference
-  );
-
-
-  json.set(
-    "sensor_distance_m",
-    sensorDistance
-  );
-
-
-  json.set(
-    "timestamp_ms",
-    (int)millis()
-  );
-
-
-  json.set(
-    "event",
-    "VEHICLE_DETECTED"
-  );
-
-
-  if (
-    Firebase.RTDB.pushJSON(
-      &fbdo,
-      "/street_light/vehicle_history",
-      &json
-    )
-  )
-  {
-    Serial.println(
-      "Vehicle history saved to Firebase"
-    );
-  }
-  else
-  {
-    Serial.print(
-      "Vehicle history error: "
-    );
-
-    Serial.println(
-      fbdo.errorReason()
-    );
-  }
-}
-
-
-// =====================================================
-// FUNCTION: SAVE ACCIDENT HISTORY
-// =====================================================
-
-void saveAccidentHistory(
-  bool alertState
-)
-{
-  FirebaseJson json;
-
-
-  json.set(
-    "accident_alert",
-    alertState
-  );
-
-
-  json.set(
-    "brightness",
-    alertState ? 100 : 0
-  );
-
-
-  if (alertState)
-  {
-    json.set(
-      "event",
-      "ACCIDENT_ALERT_ON"
-    );
-  }
-  else
-  {
-    json.set(
-      "event",
-      "ACCIDENT_ALERT_OFF"
-    );
-  }
-
-
-  json.set(
-    "timestamp_ms",
-    (int)millis()
-  );
-
-
-  if (
-    Firebase.RTDB.pushJSON(
-      &fbdo,
-      "/street_light/accident_history",
-      &json
-    )
-  )
-  {
-    Serial.println(
-      "Accident event saved to Firebase"
-    );
-  }
-  else
-  {
-    Serial.print(
-      "Accident history error: "
-    );
-
-    Serial.println(
-      fbdo.errorReason()
-    );
-  }
-}
-
-
-// =====================================================
-// FUNCTION: BUZZER
-// =====================================================
-
-void beepBuzzer(
-  int duration
-)
-{
-  digitalWrite(
-    BUZZER_PIN,
-    HIGH
-  );
-
-  delay(duration);
-
-  digitalWrite(
-    BUZZER_PIN,
-    LOW
-  );
-}
-
-
-// =====================================================
-// SETUP
-// =====================================================
-
-void setup()
-{
-  Serial.begin(115200);
-
-  delay(1000);
-
-
-  Serial.println();
-  Serial.println(
-    "========================================"
-  );
-
-  Serial.println(
-    " SMART STREET LIGHT SYSTEM"
-  );
-
-  Serial.println(
-    " SPEED + FIREBASE + ACCIDENT ALERT"
-  );
-
-  Serial.println(
-    "========================================"
-  );
-
-
-  // ===================================================
-  // PIN SETUP
-  // ===================================================
-
-  pinMode(
-    IR1_PIN,
-    INPUT
-  );
-
-  pinMode(
-    IR2_PIN,
-    INPUT
-  );
-
-
-  pinMode(
-    BUZZER_PIN,
-    OUTPUT
-  );
-
-
-  // Accident button
-  // Button -> GPIO33
-  // Other side -> GND
-
-  pinMode(
-    ACCIDENT_BUTTON_PIN,
-    INPUT_PULLUP
-  );
-
-
-  digitalWrite(
-    BUZZER_PIN,
-    LOW
-  );
-
-
-  // ===================================================
-  // PWM SETUP
-  // ===================================================
-
-  ledcSetup(
-    LED1_CHANNEL,
-    PWM_FREQ,
-    PWM_RESOLUTION
-  );
-
-
-  ledcSetup(
-    LED2_CHANNEL,
-    PWM_FREQ,
-    PWM_RESOLUTION
-  );
-
-
-  ledcAttachPin(
-    LED1_PIN,
-    LED1_CHANNEL
-  );
-
-
-  ledcAttachPin(
-    LED2_PIN,
-    LED2_CHANNEL
-  );
-
-
-  // Lights OFF
-  setLights(0);
-
-
-  // ===================================================
-  // PIN INFORMATION
-  // ===================================================
-
-  Serial.println();
-  Serial.println(
-    "PIN CONFIGURATION"
-  );
-
-  Serial.println(
-    "IR Sensor 1       : GPIO 34"
-  );
-
-  Serial.println(
-    "IR Sensor 2       : GPIO 35"
-  );
-
-  Serial.println(
-    "LED 1             : GPIO 25"
-  );
-
-  Serial.println(
-    "LED 2             : GPIO 26"
-  );
-
-  Serial.println(
-    "Buzzer            : GPIO 27"
-  );
-
-  Serial.println(
-    "Accident Button   : GPIO 33"
-  );
-
-
-  Serial.print(
-    "Sensor Distance   : "
-  );
-
-  Serial.print(
-    sensorDistance
-  );
-
-  Serial.println(
-    " m"
-  );
-
-
-  // ===================================================
-  // WIFI CONNECTION
-  // ===================================================
-
-  Serial.println();
-  Serial.println(
-    "Connecting to iPhone Hotspot..."
-  );
-
-
-  WiFi.begin(
-    WIFI_SSID,
-    WIFI_PASSWORD
-  );
-
-
-  int wifiAttempts = 0;
-
-
-  while (
-    WiFi.status() != WL_CONNECTED &&
-    wifiAttempts < 40
-  )
-  {
-    delay(500);
-
-    Serial.print(".");
-
-    wifiAttempts++;
-  }
-
-
-  if (
-    WiFi.status() == WL_CONNECTED
-  )
-  {
-    Serial.println();
-
-    Serial.println(
-      "WiFi Connected!"
-    );
-
-
-    Serial.print(
-      "IP Address: "
-    );
-
-    Serial.println(
-      WiFi.localIP()
-    );
-
-
-    Serial.print(
-      "WiFi RSSI: "
-    );
-
-    Serial.print(
-      WiFi.RSSI()
-    );
-
-    Serial.println(
-      " dBm"
-    );
-  }
-  else
-  {
-    Serial.println();
-
-    Serial.println(
-      "WiFi Connection Failed!"
-    );
-  }
-
-
-  // ===================================================
-  // FIREBASE CONFIG
-  // ===================================================
-
-  config.api_key =
-    API_KEY;
-
-
-  config.database_url =
-    DATABASE_URL;
-
-
-  config.signer.tokens.legacy_token =
-    DATABASE_SECRET;
-
-
-  // ===================================================
-  // START FIREBASE
-  // ===================================================
-
-  Firebase.begin(
-    &config,
-    &auth
-  );
-
-
-  Firebase.reconnectWiFi(
-    true
-  );
-
-
-  Serial.println();
-  Serial.println(
-    "Firebase initialized"
-  );
-
-
-  delay(1000);
-
-
-  // ===================================================
-  // INITIAL FIREBASE DATA
-  // ===================================================
-
-  Firebase.RTDB.setString(
-    &fbdo,
-    "/street_light/live/status",
-    "ONLINE"
-  );
-
-
-  Firebase.RTDB.setBool(
-    &fbdo,
-    "/street_light/live/accident_alert",
-    false
-  );
-
-
-  Firebase.RTDB.setBool(
-    &fbdo,
-    "/street_light/live/vehicle_detected",
-    false
-  );
-
-
-  Firebase.RTDB.setInt(
-    &fbdo,
-    "/street_light/live/brightness",
-    0
-  );
-
-
-  Firebase.RTDB.setFloat(
-    &fbdo,
-    "/street_light/live/speed_kmh",
-    0
-  );
-
-
-  Firebase.RTDB.setFloat(
-    &fbdo,
-    "/street_light/live/speed_ms",
-    0
-  );
-
-
-  Firebase.RTDB.setFloat(
-    &fbdo,
-    "/street_light/live/sensor_distance",
-    sensorDistance
-  );
-
-
-  Firebase.RTDB.setInt(
-    &fbdo,
-    "/street_light/live/time_difference_ms",
-    0
-  );
-
-
-  Serial.println();
-  Serial.println(
-    "Firebase initial data uploaded"
-  );
-
-
-  // ===================================================
-  // READY
-  // ===================================================
-
-  Serial.println();
-  Serial.println(
-    "========================================"
-  );
-
-  Serial.println(
-    "SYSTEM READY"
-  );
-
-  Serial.println(
-    "========================================"
-  );
-
-  Serial.println(
-    "Normal Mode:"
-  );
-
-  Serial.println(
-    "Vehicle speed controls brightness"
-  );
-
-  Serial.println();
-
-  Serial.println(
-    "Accident Button:"
-  );
-
-  Serial.println(
-    "PRESS 1 -> Lights 100%"
-  );
-
-  Serial.println(
-    "PRESS 2 -> Lights OFF"
-  );
-
-  Serial.println(
-    "========================================"
-  );
-}
-
-
-// =====================================================
-// LOOP
-// =====================================================
-
-void loop()
-{
-
-  // ===================================================
-  // ACCIDENT BUTTON
-  // ===================================================
-
-  bool buttonState =
-    digitalRead(
-      ACCIDENT_BUTTON_PIN
-    );
-
-
-  // Detect button press
-  if (
-    buttonState == LOW &&
-    lastButtonState == HIGH &&
-    millis() - lastButtonTime >
-    debounceTime
-  )
-  {
-
-    lastButtonTime =
-      millis();
-
-
-    // Toggle accident mode
-
-    accidentMode =
-      !accidentMode;
-
-
-    // =================================================
-    // ACCIDENT MODE ON
-    // =================================================
-
-    if (accidentMode)
-    {
-
-      Serial.println();
-      Serial.println(
-        "########################################"
-      );
-
-      Serial.println(
-        " ACCIDENT ALERT ACTIVATED"
-      );
-
-      Serial.println(
-        " ALL LIGHTS = 100%"
-      );
-
-      Serial.println(
-        "########################################"
-      );
-
-
-      // Full brightness
-
-      currentBrightness =
-        100;
-
-      setLights(255);
-
-
-      // Buzzer
-
-      beepBuzzer(500);
-
-
-      // Save event
-
-      saveAccidentHistory(
-        true
-      );
-
-
-      // Update live Firebase
-
-      saveLiveData();
-    }
-
-
-    // =================================================
-    // ACCIDENT MODE OFF
-    // =================================================
-
-    else
-    {
-
-      Serial.println();
-      Serial.println(
-        "########################################"
-      );
-
-      Serial.println(
-        " ACCIDENT ALERT DEACTIVATED"
-      );
-
-      Serial.println(
-        " LIGHTS = OFF"
-      );
-
-      Serial.println(
-        "########################################"
-      );
-
-
-      currentBrightness =
-        0;
-
-
-      setLights(0);
-
-
-      // Save event
-
-      saveAccidentHistory(
-        false
-      );
-
-
-      // Update Firebase
-
-      saveLiveData();
-    }
-  }
-
-
-  lastButtonState =
-    buttonState;
-
-
-  // ===================================================
-  // ACCIDENT MODE ACTIVE
-  // ===================================================
-
-  if (accidentMode)
-  {
-
-    // Continuously maintain full brightness
-
-    setLights(255);
-
-
-    currentBrightness =
-      100;
-
-
-    // Periodic Firebase update
-
-    if (
-      millis() -
-      lastFirebaseUpdate >=
-      firebaseUpdateInterval
-    )
-    {
-
-      lastFirebaseUpdate =
-        millis();
-
-
-      saveLiveData();
-    }
-
-
-    delay(10);
-
-    return;
-  }
-
-
-  // ===================================================
-  // READ IR SENSORS
-  // ===================================================
-
-  int ir1 =
-    digitalRead(
-      IR1_PIN
-    );
-
-
-  int ir2 =
-    digitalRead(
-      IR2_PIN
-    );
-
-
-  // Most IR modules:
-  // LOW = object detected
-
-  bool detect1 =
-    (ir1 == LOW);
-
-
-  bool detect2 =
-    (ir2 == LOW);
-
-
-  // ===================================================
-  // PERIODIC LIVE FIREBASE UPDATE
-  // ===================================================
-
-  if (
-    millis() -
-    lastFirebaseUpdate >=
-    firebaseUpdateInterval
-  )
-  {
-
-    lastFirebaseUpdate =
-      millis();
-
-
-    saveLiveData();
-  }
-
-
-  // ===================================================
-  // IR SENSOR 1
-  // ===================================================
-
-  if (
-    detect1 &&
-    !sensor1Triggered
-  )
-  {
-
-    sensor1Time =
-      millis();
-
-
-    sensor1Triggered =
-      true;
-
-
-    Serial.println();
-    Serial.println(
-      "----------------------------------------"
-    );
-
-    Serial.println(
-      "IR SENSOR 1 -> VEHICLE DETECTED"
-    );
-
-
-    Serial.print(
-      "Sensor 1 Time: "
-    );
-
-    Serial.print(
-      sensor1Time
-    );
-
-    Serial.println(
-      " ms"
-    );
-
-
-    // Firebase
-
-    Firebase.RTDB.setInt(
-      &fbdo,
-      "/street_light/live/ir1",
-      ir1
-    );
-
-
-    Firebase.RTDB.setBool(
-      &fbdo,
-      "/street_light/live/vehicle_detected",
-      true
-    );
-
-
-    Firebase.RTDB.setString(
-      &fbdo,
-      "/street_light/live/status",
-      "SENSOR_1_DETECTED"
-    );
-  }
-
-
-  // ===================================================
-  // IR SENSOR 2
-  // ===================================================
-
-  if (
-    detect2 &&
-    sensor1Triggered &&
-    !sensor2Triggered
-  )
-  {
-
-    sensor2Time =
-      millis();
-
-
-    sensor2Triggered =
-      true;
-
-
-    // =================================================
-    // CALCULATE TIME
-    // =================================================
-
-    currentTimeDifference =
-      sensor2Time -
-      sensor1Time;
-
-
-    Serial.println();
-
-    Serial.println(
-      "IR SENSOR 2 -> VEHICLE DETECTED"
-    );
-
-
-    Serial.print(
-      "Time Difference: "
-    );
-
-    Serial.print(
-      currentTimeDifference
-    );
-
-    Serial.println(
-      " ms"
-    );
-
-
-    if (
-      currentTimeDifference > 0
-    )
-    {
-
-      // ===============================================
-      // SPEED CALCULATION
-      // ===============================================
-
-      float timeSeconds =
-        currentTimeDifference /
-        1000.0;
-
-
-      currentSpeedMS =
-        sensorDistance /
-        timeSeconds;
-
-
-      currentSpeedKMH =
-        currentSpeedMS *
-        3.6;
-
-
-      // ===============================================
-      // SPEED BASED BRIGHTNESS
-      // ===============================================
-
-      int pwmBrightness;
-
-
-      if (
-        currentSpeedKMH <= 5
-      )
-      {
-        pwmBrightness = 77;
-
-        currentBrightness =
-          30;
-      }
-
-
-      else if (
-        currentSpeedKMH <= 10
-      )
-      {
-        pwmBrightness = 128;
-
-        currentBrightness =
-          50;
-      }
-
-
-      else if (
-        currentSpeedKMH <= 20
-      )
-      {
-        pwmBrightness = 179;
-
-        currentBrightness =
-          70;
-      }
-
-
-      else if (
-        currentSpeedKMH <= 30
-      )
-      {
-        pwmBrightness = 217;
-
-        currentBrightness =
-          85;
-      }
-
-
-      else
-      {
-        pwmBrightness = 255;
-
-        currentBrightness =
-          100;
-      }
-
-
-      // ===============================================
-      // SET LIGHTS
-      // ===============================================
-
-      setLights(
-        pwmBrightness
-      );
-
-
-      // ===============================================
-      // SERIAL MONITOR
-      // ===============================================
-
-      Serial.println();
-
-      Serial.println(
-        "========================================"
-      );
-
-      Serial.println(
-        " VEHICLE DATA"
-      );
-
-      Serial.println(
-        "========================================"
-      );
-
-
-      Serial.print(
-        "Distance       : "
-      );
-
-      Serial.print(
-        sensorDistance
-      );
-
-      Serial.println(
-        " m"
-      );
-
-
-      Serial.print(
-        "Time Difference: "
-      );
-
-      Serial.print(
-        currentTimeDifference
-      );
-
-      Serial.println(
-        " ms"
-      );
-
-
-      Serial.print(
-        "Speed          : "
-      );
-
-      Serial.print(
-        currentSpeedMS,
-        2
-      );
-
-      Serial.println(
-        " m/s"
-      );
-
-
-      Serial.print(
-        "Speed          : "
-      );
-
-      Serial.print(
-        currentSpeedKMH,
-        2
-      );
-
-      Serial.println(
-        " km/h"
-      );
-
-
-      Serial.print(
-        "Brightness     : "
-      );
-
-      Serial.print(
-        currentBrightness
-      );
-
-      Serial.println(
-        "%"
-      );
-
-
-      Serial.println(
-        "========================================"
-      );
-
-
-      // ===============================================
-      // SAVE VEHICLE HISTORY
-      // ===============================================
-
-      saveVehicleHistory();
-
-
-      // ===============================================
-      // UPDATE LIVE DATA
-      // ===============================================
-
-      saveLiveData();
-
-
-      // ===============================================
-      // BUZZER
-      // ===============================================
-
-      beepBuzzer(200);
-
-
-      // ===============================================
-      // LIGHT ACTIVE
-      // ===============================================
-
-      delay(2000);
-
-
-      // ===============================================
-      // TURN LIGHTS OFF
-      // ===============================================
-
-      setLights(0);
-
-      currentBrightness =
-        0;
-
-
-      // ===============================================
-      // FIREBASE AFTER VEHICLE
-      // ===============================================
-
-      Firebase.RTDB.setInt(
-        &fbdo,
-        "/street_light/live/brightness",
-        0
-      );
-
-
-      Firebase.RTDB.setBool(
-        &fbdo,
-        "/street_light/live/vehicle_detected",
-        false
-      );
-
-
-      Firebase.RTDB.setString(
-        &fbdo,
-        "/street_light/live/status",
-        "WAITING"
-      );
-
-
-      Serial.println();
-
-      Serial.println(
-        "Vehicle passed"
-      );
-
-      Serial.println(
-        "Lights OFF"
-      );
-    }
-
-
-    // =================================================
-    // RESET
-    // =================================================
-
-    sensor1Triggered =
-      false;
-
-    sensor2Triggered =
-      false;
-  }
-
-
-  delay(5);
-}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Street Light · Ultimate Dashboard</title>
+    <!-- Chart.js for real-time sparklines -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <!-- Firebase compat libraries -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+    <!-- Google Fonts & Icons -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0b0f19;
+            color: #eef2ff;
+            padding: 24px 20px;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .dashboard {
+            max-width: 1440px;
+            width: 100%;
+        }
+
+        /* header */
+        .header {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 28px;
+            gap: 16px;
+        }
+
+        .header h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            background: linear-gradient(135deg, #b3e0ff, #7aa9ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -0.02em;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .header h1 i {
+            background: #1e2a3a;
+            padding: 10px;
+            border-radius: 16px;
+            color: #7aa9ff;
+            font-size: 1.6rem;
+            -webkit-text-fill-color: #7aa9ff;
+        }
+
+        .connection-badge {
+            background: #1e293b;
+            padding: 10px 20px;
+            border-radius: 100px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            border: 1px solid #2d3b4f;
+            box-shadow: 0 6px 14px rgba(0, 0, 0, 0.4);
+        }
+
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #22c55e;
+            box-shadow: 0 0 12px #22c55e;
+            transition: 0.2s;
+        }
+
+        .dot.offline {
+            background: #ef4444;
+            box-shadow: 0 0 12px #ef4444;
+        }
+
+        /* KPI grid */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 18px;
+            margin-bottom: 28px;
+        }
+
+        .kpi-card {
+            background: #111827;
+            border: 1px solid #1f2a3f;
+            border-radius: 24px;
+            padding: 18px 20px;
+            backdrop-filter: blur(4px);
+            transition: 0.2s;
+            box-shadow: 0 10px 20px -10px rgba(0, 0, 0, 0.6);
+        }
+
+        .kpi-card:hover {
+            border-color: #2e4a6b;
+            background: #141e30;
+        }
+
+        .kpi-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+            color: #8a9bb5;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .kpi-value {
+            font-size: 2rem;
+            font-weight: 700;
+            line-height: 1.2;
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+        }
+
+        .kpi-unit {
+            font-size: 0.9rem;
+            font-weight: 500;
+            color: #7b8ba3;
+        }
+
+        .trend {
+            font-size: 0.75rem;
+            margin-left: 8px;
+            color: #6b7c98;
+        }
+
+        /* main content grid: left panel (live + controls) and right panel (history) */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1.2fr 1.8fr;
+            gap: 22px;
+            margin-bottom: 28px;
+        }
+
+        @media (max-width: 900px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .panel {
+            background: #0f1622;
+            border: 1px solid #1e2a3c;
+            border-radius: 28px;
+            padding: 22px 22px 20px;
+            box-shadow: 0 20px 30px -20px #00000080;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .panel-header h2 {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #ccddfa;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-tag {
+            background: #1b2537;
+            border-radius: 40px;
+            padding: 6px 14px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            border: 1px solid #2d3f59;
+        }
+
+        .status-tag.alert {
+            background: #2f1a1a;
+            border-color: #7f2e2e;
+            color: #ff9f9f;
+        }
+
+        /* sensor row */
+        .sensor-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .sensor-box {
+            flex: 1;
+            background: #141e2d;
+            border-radius: 18px;
+            padding: 16px;
+            text-align: center;
+            border: 1px solid #25344b;
+        }
+
+        .sensor-label {
+            font-size: 0.75rem;
+            color: #95a9c7;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .sensor-state {
+            font-size: 1.6rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .ir-high {
+            color: #22c55e;
+        }
+
+        .ir-low {
+            color: #f97316;
+        }
+
+        .vehicle-badge {
+            background: #1e2f42;
+            border-radius: 100px;
+            padding: 8px 18px;
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+            margin-top: 8px;
+            border: 1px solid #2c405a;
+        }
+
+        /* brightness visual */
+        .brightness-visual {
+            margin: 24px 0 18px;
+        }
+
+        .brightness-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            color: #a5bbdb;
+            margin-bottom: 6px;
+        }
+
+        .bar-bg {
+            height: 16px;
+            background: #1e2a3a;
+            border-radius: 100px;
+            overflow: hidden;
+            border: 1px solid #2b3b52;
+        }
+
+        .bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #fbbf24, #f59e0b);
+            border-radius: 100px;
+            transition: width 0.4s ease;
+            box-shadow: 0 0 12px #f59e0b80;
+        }
+
+        .accident-button {
+            background: #1f1a2e;
+            border: 1px solid #4f3b5e;
+            border-radius: 100px;
+            padding: 14px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            font-weight: 600;
+            width: 100%;
+            cursor: default;
+            color: #e5c7ff;
+            margin-top: 10px;
+        }
+
+        .accident-button i {
+            font-size: 1.2rem;
+        }
+
+        .accident-active {
+            background: #331b1b;
+            border-color: #b91c1c;
+            color: #ffb3b3;
+            box-shadow: 0 0 18px #b91c1c60;
+        }
+
+        /* history tables */
+        .history-list {
+            max-height: 320px;
+            overflow-y: auto;
+            padding-right: 6px;
+        }
+
+        .history-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #101a28;
+            border-radius: 16px;
+            padding: 12px 16px;
+            margin-bottom: 8px;
+            border-left: 4px solid #2d4b6e;
+            font-size: 0.85rem;
+        }
+
+        .history-item.accident {
+            border-left-color: #ef4444;
+            background: #1e131a;
+        }
+
+        .history-time {
+            color: #8499b9;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .history-detail {
+            font-weight: 600;
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .badge {
+            background: #253c56;
+            padding: 4px 12px;
+            border-radius: 60px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            color: #b8d1f0;
+        }
+
+        /* charts */
+        .chart-container {
+            margin-top: 24px;
+            background: #0c1320;
+            border-radius: 20px;
+            padding: 16px;
+            border: 1px solid #1e2a3c;
+        }
+
+        canvas {
+            width: 100% !important;
+            height: 100px !important;
+        }
+
+        .footnote {
+            text-align: center;
+            margin-top: 30px;
+            font-size: 0.75rem;
+            color: #4b5f7a;
+        }
+
+        i {
+            color: #6284b0;
+        }
+
+        .kpi-card i {
+            color: #5f8bd3;
+            font-size: 1rem;
+        }
+    </style>
+</head>
+<body>
+<div class="dashboard">
+    <!-- Header -->
+    <div class="header">
+        <h1>
+            <i class="fas fa-lightbulb"></i> Smart Street Light
+        </h1>
+        <div class="connection-badge">
+            <span class="dot" id="connectionDot"></span>
+            <span id="connectionText">Connecting…</span>
+            <i class="fas fa-wifi" style="margin-left: 6px;"></i>
+        </div>
+    </div>
+
+    <!-- KPI cards -->
+    <div class="kpi-grid">
+        <div class="kpi-card">
+            <div class="kpi-label"><i class="fas fa-tachometer-alt"></i> Speed</div>
+            <div class="kpi-value"><span id="speedKMH">0.0</span> <span class="kpi-unit">km/h</span></div>
+            <div class="trend" id="speedMS">0.00 m/s</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label"><i class="fas fa-sun"></i> Brightness</div>
+            <div class="kpi-value"><span id="brightnessVal">0</span> <span class="kpi-unit">%</span></div>
+            <div class="trend" id="pwmVal">PWM 0</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label"><i class="fas fa-clock"></i> Time diff</div>
+            <div class="kpi-value"><span id="timeDiff">0</span> <span class="kpi-unit">ms</span></div>
+            <div class="trend" id="sensorDistance">0.10 m base</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label"><i class="fas fa-microchip"></i> Uptime</div>
+            <div class="kpi-value"><span id="uptimeMin">0</span> <span class="kpi-unit">min</span></div>
+            <div class="trend" id="uptimeMs">0 ms</div>
+        </div>
+    </div>
+
+    <!-- Main content: left (live) + right (history) -->
+    <div class="main-grid">
+        <!-- LEFT PANEL -->
+        <div class="panel">
+            <div class="panel-header">
+                <h2><i class="fas fa-satellite-dish"></i> Live telemetry</h2>
+                <span class="status-tag" id="statusTag">WAITING</span>
+            </div>
+
+            <!-- IR sensors -->
+            <div class="sensor-row">
+                <div class="sensor-box">
+                    <div class="sensor-label">IR SENSOR 1</div>
+                    <div class="sensor-state" id="ir1State">
+                        <i class="fas fa-circle" style="color: #4b5563;"></i> <span>--</span>
+                    </div>
+                </div>
+                <div class="sensor-box">
+                    <div class="sensor-label">IR SENSOR 2</div>
+                    <div class="sensor-state" id="ir2State">
+                        <i class="fas fa-circle" style="color: #4b5563;"></i> <span>--</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Vehicle detected & accident -->
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                <div class="vehicle-badge" id="vehicleBadge">
+                    <i class="fas fa-car"></i> <span id="vehicleText">No vehicle</span>
+                </div>
+                <div class="vehicle-badge" id="accidentBadge" style="background: #1e1a2a;">
+                    <i class="fas fa-exclamation-triangle"></i> <span id="accidentText">No alert</span>
+                </div>
+            </div>
+
+            <!-- Brightness bar -->
+            <div class="brightness-visual">
+                <div class="brightness-label">
+                    <span><i class="fas fa-lightbulb"></i> Light intensity</span>
+                    <span id="brightnessPercentLabel">0%</span>
+                </div>
+                <div class="bar-bg">
+                    <div class="bar-fill" id="brightnessBar" style="width: 0%;"></div>
+                </div>
+            </div>
+
+            <!-- Accident indicator (remote) -->
+            <div class="accident-button" id="accidentIndicator">
+                <i class="fas fa-bell"></i> Accident alert: <span id="accidentIndicatorText">INACTIVE</span>
+            </div>
+
+            <!-- Mini speed chart (last 10 readings) -->
+            <div class="chart-container">
+                <div style="display: flex; justify-content: space-between; font-size: 0.7rem; color: #7f93b0; margin-bottom: 6px;">
+                    <span>📈 Speed trend (km/h)</span>
+                    <span id="lastUpdated">just now</span>
+                </div>
+                <canvas id="speedChart"></canvas>
+            </div>
+        </div>
+
+        <!-- RIGHT PANEL: History -->
+        <div class="panel">
+            <div class="panel-header">
+                <h2><i class="fas fa-history"></i> Recent events</h2>
+                <span class="badge" id="historyCount">0</span>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+                <div style="font-weight: 600; font-size: 0.85rem; color: #b0c8f0;"><i class="fas fa-car-side"></i> Vehicle history</div>
+                <div style="font-weight: 600; font-size: 0.85rem; color: #f0b0b0;"><i class="fas fa-ambulance"></i> Accident history</div>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div class="history-list" id="vehicleHistoryList">
+                    <div style="color: #4f6382; font-size: 0.8rem; padding: 12px;">No vehicle events yet</div>
+                </div>
+                <div class="history-list" id="accidentHistoryList">
+                    <div style="color: #4f6382; font-size: 0.8rem; padding: 12px;">No accident events</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footnote">
+        <i class="fas fa-database"></i> Firebase Realtime · street-light-c4fc1
+    </div>
+</div>
+
+<script>
+    (function() {
+        // ---------- FIREBASE CONFIG ----------
+        const firebaseConfig = {
+            apiKey: "AIzaSyAE5cxCHExRfcfeqPYvgAI1GxXs6tznmi",
+            databaseURL: "https://street-light-c4fc1-default-rtdb.asia-southeast1.firebasedatabase.app"
+        };
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+
+        // ---------- DOM refs ----------
+        const connectionDot = document.getElementById('connectionDot');
+        const connectionText = document.getElementById('connectionText');
+        const speedKMH = document.getElementById('speedKMH');
+        const speedMS = document.getElementById('speedMS');
+        const brightnessVal = document.getElementById('brightnessVal');
+        const pwmVal = document.getElementById('pwmVal');
+        const timeDiff = document.getElementById('timeDiff');
+        const sensorDistance = document.getElementById('sensorDistance');
+        const uptimeMin = document.getElementById('uptimeMin');
+        const uptimeMs = document.getElementById('uptimeMs');
+        const statusTag = document.getElementById('statusTag');
+        const ir1State = document.getElementById('ir1State');
+        const ir2State = document.getElementById('ir2State');
+        const vehicleText = document.getElementById('vehicleText');
+        const accidentText = document.getElementById('accidentText');
+        const brightnessBar = document.getElementById('brightnessBar');
+        const brightnessPercentLabel = document.getElementById('brightnessPercentLabel');
+        const accidentIndicator = document.getElementById('accidentIndicator');
+        const accidentIndicatorText = document.getElementById('accidentIndicatorText');
+        const vehicleHistoryList = document.getElementById('vehicleHistoryList');
+        const accidentHistoryList = document.getElementById('accidentHistoryList');
+        const historyCount = document.getElementById('historyCount');
+        const lastUpdated = document.getElementById('lastUpdated');
+
+        // ---------- Charts (speed sparkline) ----------
+        const ctx = document.getElementById('speedChart').getContext('2d');
+        const speedChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: Array(10).fill(''),
+                datasets: [{
+                    label: 'Speed km/h',
+                    data: Array(10).fill(0),
+                    borderColor: '#fbbf24',
+                    backgroundColor: 'rgba(251, 191, 36, 0.1)',
+                    borderWidth: 2,
+                    pointRadius: 2,
+                    pointBackgroundColor: '#f59e0b',
+                    tension: 0.3,
+                    fill: true,
+                    spanGaps: true
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { display: false },
+                    y: { display: false, min: 0 }
+                },
+                animation: { duration: 300 }
+            }
+        });
+
+        function addSpeedPoint(speed) {
+            const chart = speedChart;
+            const dataArr = chart.data.datasets[0].data;
+            dataArr.push(speed);
+            if (dataArr.length > 10) dataArr.shift();
+            chart.update('none');
+        }
+
+        // ---------- live data listeners ----------
+        const liveRef = database.ref('/street_light/live');
+
+        // connection status
+        const connectedRef = database.ref('.info/connected');
+        connectedRef.on('value', (snap) => {
+            const connected = snap.val() === true;
+            if (connected) {
+                connectionDot.classList.remove('offline');
+                connectionText.innerText = 'Connected';
+            } else {
+                connectionDot.classList.add('offline');
+                connectionText.innerText = 'Disconnected';
+            }
+        });
+
+        // main live data listener
+        liveRef.on('value', (snapshot) => {
+            const data = snapshot.val();
+            if (!data) return;
+
+            // speed
+            const spdKMH = data.speed_kmh ?? 0;
+            const spdMS = data.speed_ms ?? 0;
+            speedKMH.innerText = spdKMH.toFixed(1);
+            speedMS.innerText = spdMS.toFixed(2) + ' m/s';
+            addSpeedPoint(spdKMH);
+
+            // brightness
+            const bright = data.brightness ?? 0;
+            brightnessVal.innerText = bright;
+            brightnessPercentLabel.innerText = bright + '%';
+            brightnessBar.style.width = bright + '%';
+            // pwm approximation: 255 * bright/100
+            const pwm = Math.round(255 * bright / 100);
+            pwmVal.innerText = `PWM ${pwm}`;
+
+            // time diff & distance
+            const tdiff = data.time_difference_ms ?? 0;
+            timeDiff.innerText = tdiff;
+            const sd = data.sensor_distance ?? 0.10;
+            sensorDistance.innerText = sd.toFixed(2) + ' m base';
+
+            // uptime
+            const uptime = data.uptime_ms ?? 0;
+            uptimeMs.innerText = uptime + ' ms';
+            uptimeMin.innerText = Math.floor(uptime / 60000);
+
+            // status tag
+            const status = data.status ?? 'WAITING';
+            statusTag.innerText = status;
+            if (status === 'ACCIDENT_ALERT') {
+                statusTag.classList.add('alert');
+            } else {
+                statusTag.classList.remove('alert');
+            }
+
+            // IR sensors
+            const ir1 = data.ir1;
+            const ir2 = data.ir2;
+            updateIRDisplay(ir1State, ir1);
+            updateIRDisplay(ir2State, ir2);
+
+            // vehicle detected
+            const vehDetected = data.vehicle_detected ?? false;
+            vehicleText.innerText = vehDetected ? 'Vehicle detected' : 'No vehicle';
+            document.getElementById('vehicleBadge').style.background = vehDetected ? '#1e3a2e' : '#1e2f42';
+
+            // accident alert
+            const accident = data.accident_alert ?? false;
+            accidentText.innerText = accident ? 'ACCIDENT ALERT' : 'No alert';
+            accidentIndicatorText.innerText = accident ? 'ACTIVE' : 'INACTIVE';
+            if (accident) {
+                accidentIndicator.classList.add('accident-active');
+                document.getElementById('accidentBadge').style.background = '#3a1e1e';
+            } else {
+                accidentIndicator.classList.remove('accident-active');
+                document.getElementById('accidentBadge').style.background = '#1e1a2a';
+            }
+
+            lastUpdated.innerText = 'updated ' + new Date().toLocaleTimeString();
+        });
+
+        function updateIRDisplay(el, value) {
+            if (value === undefined || value === null) {
+                el.innerHTML = `<i class="fas fa-circle" style="color: #4b5563;"></i> <span>--</span>`;
+                return;
+            }
+            const isLow = (value === 0 || value === false);
+            const color = isLow ? '#f97316' : '#22c55e';
+            const text = isLow ? 'LOW (detect)' : 'HIGH (idle)';
+            el.innerHTML = `<i class="fas fa-circle" style="color: ${color};"></i> <span>${text}</span>`;
+        }
+
+        // ---------- history listeners ----------
+        // vehicle history (last 6 entries)
+        const vehicleHistRef = database.ref('/street_light/vehicle_history').limitToLast(8);
+        vehicleHistRef.on('value', (snapshot) => {
+            const list = vehicleHistoryList;
+            list.innerHTML = '';
+            const items = [];
+            snapshot.forEach(child => {
+                items.push(child.val());
+            });
+            items.reverse(); // newest first
+            if (items.length === 0) {
+                list.innerHTML = '<div style="color: #4f6382; font-size: 0.8rem; padding: 12px;">No vehicle events yet</div>';
+                historyCount.innerText = 0;
+                return;
+            }
+            items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'history-item';
+                const speed = item.speed_kmh ? item.speed_kmh.toFixed(1) : '0.0';
+                const time = item.timestamp_ms ? (item.timestamp_ms / 1000).toFixed(1) + 's' : '--';
+                const bright = item.brightness ?? 0;
+                div.innerHTML = `
+                    <div class="history-detail">
+                        <span><i class="fas fa-tachometer-alt"></i> ${speed} km/h</span>
+                        <span><i class="fas fa-lightbulb"></i> ${bright}%</span>
+                    </div>
+                    <div class="history-time">${time}</div>
+                `;
+                list.appendChild(div);
+            });
+            historyCount.innerText = items.length;
+        });
+
+        // accident history (last 6)
+        const accidentHistRef = database.ref('/street_light/accident_history').limitToLast(6);
+        accidentHistRef.on('value', (snapshot) => {
+            const list = accidentHistoryList;
+            list.innerHTML = '';
+            const items = [];
+            snapshot.forEach(child => {
+                items.push(child.val());
+            });
+            items.reverse();
+            if (items.length === 0) {
+                list.innerHTML = '<div style="color: #4f6382; font-size: 0.8rem; padding: 12px;">No accident events</div>';
+                return;
+            }
+            items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'history-item accident';
+                const event = item.event || 'EVENT';
+                const time = item.timestamp_ms ? (item.timestamp_ms / 1000).toFixed(1) + 's' : '--';
+                const bright = item.brightness ?? 0;
+                div.innerHTML = `
+                    <div class="history-detail">
+                        <span><i class="fas fa-exclamation-circle"></i> ${event}</span>
+                        <span><i class="fas fa-lightbulb"></i> ${bright}%</span>
+                    </div>
+                    <div class="history-time">${time}</div>
+                `;
+                list.appendChild(div);
+            });
+        });
+
+        // initial connection indicator
+        connectionDot.classList.add('offline');
+        connectionText.innerText = 'Connecting…';
+    })();
+</script>
+</body>
+</html>
