@@ -1,0 +1,1408 @@
+#include <WiFi.h>
+#include <Firebase_ESP_Client.h>
+
+// =====================================================
+// WIFI
+// =====================================================
+
+#define WIFI_SSID     "iPhone"
+#define WIFI_PASSWORD "12345678"
+
+
+// =====================================================
+// FIREBASE
+// =====================================================
+
+#define API_KEY "AIzaSyAE5cxCHExRfcfeqPYvgAI1GxXs6tznmi"
+
+#define DATABASE_URL \
+"https://street-light-c4fc1-default-rtdb.asia-southeast1.firebasedatabase.app"
+
+// Firebase Database Secret
+#define DATABASE_SECRET \
+"nBzqPi0iOh4F3oTXoF1ltY3Ou0cB3tpJ2vUf8jI7"
+
+
+// =====================================================
+// FIREBASE OBJECTS
+// =====================================================
+
+FirebaseData fbdo;
+
+FirebaseAuth auth;
+
+FirebaseConfig config;
+
+
+// =====================================================
+// PIN CONFIGURATION
+// =====================================================
+
+// IR sensors
+#define IR1_PIN 34
+#define IR2_PIN 35
+
+// LEDs
+#define LED1_PIN 25
+#define LED2_PIN 26
+
+// Buzzer
+#define BUZZER_PIN 27
+
+// Accident / emergency button
+#define ACCIDENT_BUTTON_PIN 33
+
+
+// =====================================================
+// PWM CONFIGURATION
+// =====================================================
+
+#define LED1_CHANNEL 0
+#define LED2_CHANNEL 1
+
+#define PWM_FREQ 5000
+#define PWM_RESOLUTION 8
+
+
+// =====================================================
+// SENSOR DISTANCE
+// =====================================================
+
+// Distance between IR1 and IR2
+// Example: 10 cm = 0.10 m
+
+float sensorDistance = 0.10;
+
+
+// =====================================================
+// SPEED VARIABLES
+// =====================================================
+
+unsigned long sensor1Time = 0;
+unsigned long sensor2Time = 0;
+
+bool sensor1Triggered = false;
+bool sensor2Triggered = false;
+
+
+// =====================================================
+// CURRENT DATA VARIABLES
+// =====================================================
+
+float currentSpeedKMH = 0.0;
+float currentSpeedMS = 0.0;
+
+int currentBrightness = 0;
+
+unsigned long currentTimeDifference = 0;
+
+
+// =====================================================
+// ACCIDENT BUTTON VARIABLES
+// =====================================================
+
+bool accidentMode = false;
+
+bool lastButtonState = HIGH;
+
+unsigned long lastButtonTime = 0;
+
+const unsigned long debounceTime = 300;
+
+
+// =====================================================
+// LIVE FIREBASE UPDATE TIMER
+// =====================================================
+
+unsigned long lastFirebaseUpdate = 0;
+
+const unsigned long firebaseUpdateInterval = 2000;
+
+
+// =====================================================
+// FUNCTION: SET LED BRIGHTNESS
+// =====================================================
+
+void setLights(int brightness)
+{
+  ledcWrite(
+    LED1_CHANNEL,
+    brightness
+  );
+
+  ledcWrite(
+    LED2_CHANNEL,
+    brightness
+  );
+}
+
+
+// =====================================================
+// FUNCTION: SAVE LIVE DATA
+// =====================================================
+
+void saveLiveData()
+{
+  int ir1 = digitalRead(IR1_PIN);
+  int ir2 = digitalRead(IR2_PIN);
+
+  bool vehicleDetected =
+    (ir1 == LOW || ir2 == LOW);
+
+
+  // IR 1
+  Firebase.RTDB.setInt(
+    &fbdo,
+    "/street_light/live/ir1",
+    ir1
+  );
+
+
+  // IR 2
+  Firebase.RTDB.setInt(
+    &fbdo,
+    "/street_light/live/ir2",
+    ir2
+  );
+
+
+  // Speed KM/H
+  Firebase.RTDB.setFloat(
+    &fbdo,
+    "/street_light/live/speed_kmh",
+    currentSpeedKMH
+  );
+
+
+  // Speed M/S
+  Firebase.RTDB.setFloat(
+    &fbdo,
+    "/street_light/live/speed_ms",
+    currentSpeedMS
+  );
+
+
+  // Brightness
+  Firebase.RTDB.setInt(
+    &fbdo,
+    "/street_light/live/brightness",
+    currentBrightness
+  );
+
+
+  // Vehicle detected
+  Firebase.RTDB.setBool(
+    &fbdo,
+    "/street_light/live/vehicle_detected",
+    vehicleDetected
+  );
+
+
+  // Accident mode
+  Firebase.RTDB.setBool(
+    &fbdo,
+    "/street_light/live/accident_alert",
+    accidentMode
+  );
+
+
+  // Time difference
+  Firebase.RTDB.setInt(
+    &fbdo,
+    "/street_light/live/time_difference_ms",
+    currentTimeDifference
+  );
+
+
+  // Sensor distance
+  Firebase.RTDB.setFloat(
+    &fbdo,
+    "/street_light/live/sensor_distance",
+    sensorDistance
+  );
+
+
+  // Uptime
+  Firebase.RTDB.setInt(
+    &fbdo,
+    "/street_light/live/uptime_ms",
+    millis()
+  );
+
+
+  // Status
+  if (accidentMode)
+  {
+    Firebase.RTDB.setString(
+      &fbdo,
+      "/street_light/live/status",
+      "ACCIDENT_ALERT"
+    );
+  }
+  else if (vehicleDetected)
+  {
+    Firebase.RTDB.setString(
+      &fbdo,
+      "/street_light/live/status",
+      "VEHICLE_DETECTED"
+    );
+  }
+  else
+  {
+    Firebase.RTDB.setString(
+      &fbdo,
+      "/street_light/live/status",
+      "WAITING"
+    );
+  }
+}
+
+
+// =====================================================
+// FUNCTION: SAVE VEHICLE HISTORY
+// =====================================================
+
+void saveVehicleHistory()
+{
+  FirebaseJson json;
+
+
+  json.set(
+    "speed_kmh",
+    currentSpeedKMH
+  );
+
+
+  json.set(
+    "speed_ms",
+    currentSpeedMS
+  );
+
+
+  json.set(
+    "brightness",
+    currentBrightness
+  );
+
+
+  json.set(
+    "time_difference_ms",
+    (int)currentTimeDifference
+  );
+
+
+  json.set(
+    "sensor_distance_m",
+    sensorDistance
+  );
+
+
+  json.set(
+    "timestamp_ms",
+    (int)millis()
+  );
+
+
+  json.set(
+    "event",
+    "VEHICLE_DETECTED"
+  );
+
+
+  if (
+    Firebase.RTDB.pushJSON(
+      &fbdo,
+      "/street_light/vehicle_history",
+      &json
+    )
+  )
+  {
+    Serial.println(
+      "Vehicle history saved to Firebase"
+    );
+  }
+  else
+  {
+    Serial.print(
+      "Vehicle history error: "
+    );
+
+    Serial.println(
+      fbdo.errorReason()
+    );
+  }
+}
+
+
+// =====================================================
+// FUNCTION: SAVE ACCIDENT HISTORY
+// =====================================================
+
+void saveAccidentHistory(
+  bool alertState
+)
+{
+  FirebaseJson json;
+
+
+  json.set(
+    "accident_alert",
+    alertState
+  );
+
+
+  json.set(
+    "brightness",
+    alertState ? 100 : 0
+  );
+
+
+  if (alertState)
+  {
+    json.set(
+      "event",
+      "ACCIDENT_ALERT_ON"
+    );
+  }
+  else
+  {
+    json.set(
+      "event",
+      "ACCIDENT_ALERT_OFF"
+    );
+  }
+
+
+  json.set(
+    "timestamp_ms",
+    (int)millis()
+  );
+
+
+  if (
+    Firebase.RTDB.pushJSON(
+      &fbdo,
+      "/street_light/accident_history",
+      &json
+    )
+  )
+  {
+    Serial.println(
+      "Accident event saved to Firebase"
+    );
+  }
+  else
+  {
+    Serial.print(
+      "Accident history error: "
+    );
+
+    Serial.println(
+      fbdo.errorReason()
+    );
+  }
+}
+
+
+// =====================================================
+// FUNCTION: BUZZER
+// =====================================================
+
+void beepBuzzer(
+  int duration
+)
+{
+  digitalWrite(
+    BUZZER_PIN,
+    HIGH
+  );
+
+  delay(duration);
+
+  digitalWrite(
+    BUZZER_PIN,
+    LOW
+  );
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup()
+{
+  Serial.begin(115200);
+
+  delay(1000);
+
+
+  Serial.println();
+  Serial.println(
+    "========================================"
+  );
+
+  Serial.println(
+    " SMART STREET LIGHT SYSTEM"
+  );
+
+  Serial.println(
+    " SPEED + FIREBASE + ACCIDENT ALERT"
+  );
+
+  Serial.println(
+    "========================================"
+  );
+
+
+  // ===================================================
+  // PIN SETUP
+  // ===================================================
+
+  pinMode(
+    IR1_PIN,
+    INPUT
+  );
+
+  pinMode(
+    IR2_PIN,
+    INPUT
+  );
+
+
+  pinMode(
+    BUZZER_PIN,
+    OUTPUT
+  );
+
+
+  // Accident button
+  // Button -> GPIO33
+  // Other side -> GND
+
+  pinMode(
+    ACCIDENT_BUTTON_PIN,
+    INPUT_PULLUP
+  );
+
+
+  digitalWrite(
+    BUZZER_PIN,
+    LOW
+  );
+
+
+  // ===================================================
+  // PWM SETUP
+  // ===================================================
+
+  ledcSetup(
+    LED1_CHANNEL,
+    PWM_FREQ,
+    PWM_RESOLUTION
+  );
+
+
+  ledcSetup(
+    LED2_CHANNEL,
+    PWM_FREQ,
+    PWM_RESOLUTION
+  );
+
+
+  ledcAttachPin(
+    LED1_PIN,
+    LED1_CHANNEL
+  );
+
+
+  ledcAttachPin(
+    LED2_PIN,
+    LED2_CHANNEL
+  );
+
+
+  // Lights OFF
+  setLights(0);
+
+
+  // ===================================================
+  // PIN INFORMATION
+  // ===================================================
+
+  Serial.println();
+  Serial.println(
+    "PIN CONFIGURATION"
+  );
+
+  Serial.println(
+    "IR Sensor 1       : GPIO 34"
+  );
+
+  Serial.println(
+    "IR Sensor 2       : GPIO 35"
+  );
+
+  Serial.println(
+    "LED 1             : GPIO 25"
+  );
+
+  Serial.println(
+    "LED 2             : GPIO 26"
+  );
+
+  Serial.println(
+    "Buzzer            : GPIO 27"
+  );
+
+  Serial.println(
+    "Accident Button   : GPIO 33"
+  );
+
+
+  Serial.print(
+    "Sensor Distance   : "
+  );
+
+  Serial.print(
+    sensorDistance
+  );
+
+  Serial.println(
+    " m"
+  );
+
+
+  // ===================================================
+  // WIFI CONNECTION
+  // ===================================================
+
+  Serial.println();
+  Serial.println(
+    "Connecting to iPhone Hotspot..."
+  );
+
+
+  WiFi.begin(
+    WIFI_SSID,
+    WIFI_PASSWORD
+  );
+
+
+  int wifiAttempts = 0;
+
+
+  while (
+    WiFi.status() != WL_CONNECTED &&
+    wifiAttempts < 40
+  )
+  {
+    delay(500);
+
+    Serial.print(".");
+
+    wifiAttempts++;
+  }
+
+
+  if (
+    WiFi.status() == WL_CONNECTED
+  )
+  {
+    Serial.println();
+
+    Serial.println(
+      "WiFi Connected!"
+    );
+
+
+    Serial.print(
+      "IP Address: "
+    );
+
+    Serial.println(
+      WiFi.localIP()
+    );
+
+
+    Serial.print(
+      "WiFi RSSI: "
+    );
+
+    Serial.print(
+      WiFi.RSSI()
+    );
+
+    Serial.println(
+      " dBm"
+    );
+  }
+  else
+  {
+    Serial.println();
+
+    Serial.println(
+      "WiFi Connection Failed!"
+    );
+  }
+
+
+  // ===================================================
+  // FIREBASE CONFIG
+  // ===================================================
+
+  config.api_key =
+    API_KEY;
+
+
+  config.database_url =
+    DATABASE_URL;
+
+
+  config.signer.tokens.legacy_token =
+    DATABASE_SECRET;
+
+
+  // ===================================================
+  // START FIREBASE
+  // ===================================================
+
+  Firebase.begin(
+    &config,
+    &auth
+  );
+
+
+  Firebase.reconnectWiFi(
+    true
+  );
+
+
+  Serial.println();
+  Serial.println(
+    "Firebase initialized"
+  );
+
+
+  delay(1000);
+
+
+  // ===================================================
+  // INITIAL FIREBASE DATA
+  // ===================================================
+
+  Firebase.RTDB.setString(
+    &fbdo,
+    "/street_light/live/status",
+    "ONLINE"
+  );
+
+
+  Firebase.RTDB.setBool(
+    &fbdo,
+    "/street_light/live/accident_alert",
+    false
+  );
+
+
+  Firebase.RTDB.setBool(
+    &fbdo,
+    "/street_light/live/vehicle_detected",
+    false
+  );
+
+
+  Firebase.RTDB.setInt(
+    &fbdo,
+    "/street_light/live/brightness",
+    0
+  );
+
+
+  Firebase.RTDB.setFloat(
+    &fbdo,
+    "/street_light/live/speed_kmh",
+    0
+  );
+
+
+  Firebase.RTDB.setFloat(
+    &fbdo,
+    "/street_light/live/speed_ms",
+    0
+  );
+
+
+  Firebase.RTDB.setFloat(
+    &fbdo,
+    "/street_light/live/sensor_distance",
+    sensorDistance
+  );
+
+
+  Firebase.RTDB.setInt(
+    &fbdo,
+    "/street_light/live/time_difference_ms",
+    0
+  );
+
+
+  Serial.println();
+  Serial.println(
+    "Firebase initial data uploaded"
+  );
+
+
+  // ===================================================
+  // READY
+  // ===================================================
+
+  Serial.println();
+  Serial.println(
+    "========================================"
+  );
+
+  Serial.println(
+    "SYSTEM READY"
+  );
+
+  Serial.println(
+    "========================================"
+  );
+
+  Serial.println(
+    "Normal Mode:"
+  );
+
+  Serial.println(
+    "Vehicle speed controls brightness"
+  );
+
+  Serial.println();
+
+  Serial.println(
+    "Accident Button:"
+  );
+
+  Serial.println(
+    "PRESS 1 -> Lights 100%"
+  );
+
+  Serial.println(
+    "PRESS 2 -> Lights OFF"
+  );
+
+  Serial.println(
+    "========================================"
+  );
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop()
+{
+
+  // ===================================================
+  // ACCIDENT BUTTON
+  // ===================================================
+
+  bool buttonState =
+    digitalRead(
+      ACCIDENT_BUTTON_PIN
+    );
+
+
+  // Detect button press
+  if (
+    buttonState == LOW &&
+    lastButtonState == HIGH &&
+    millis() - lastButtonTime >
+    debounceTime
+  )
+  {
+
+    lastButtonTime =
+      millis();
+
+
+    // Toggle accident mode
+
+    accidentMode =
+      !accidentMode;
+
+
+    // =================================================
+    // ACCIDENT MODE ON
+    // =================================================
+
+    if (accidentMode)
+    {
+
+      Serial.println();
+      Serial.println(
+        "########################################"
+      );
+
+      Serial.println(
+        " ACCIDENT ALERT ACTIVATED"
+      );
+
+      Serial.println(
+        " ALL LIGHTS = 100%"
+      );
+
+      Serial.println(
+        "########################################"
+      );
+
+
+      // Full brightness
+
+      currentBrightness =
+        100;
+
+      setLights(255);
+
+
+      // Buzzer
+
+      beepBuzzer(500);
+
+
+      // Save event
+
+      saveAccidentHistory(
+        true
+      );
+
+
+      // Update live Firebase
+
+      saveLiveData();
+    }
+
+
+    // =================================================
+    // ACCIDENT MODE OFF
+    // =================================================
+
+    else
+    {
+
+      Serial.println();
+      Serial.println(
+        "########################################"
+      );
+
+      Serial.println(
+        " ACCIDENT ALERT DEACTIVATED"
+      );
+
+      Serial.println(
+        " LIGHTS = OFF"
+      );
+
+      Serial.println(
+        "########################################"
+      );
+
+
+      currentBrightness =
+        0;
+
+
+      setLights(0);
+
+
+      // Save event
+
+      saveAccidentHistory(
+        false
+      );
+
+
+      // Update Firebase
+
+      saveLiveData();
+    }
+  }
+
+
+  lastButtonState =
+    buttonState;
+
+
+  // ===================================================
+  // ACCIDENT MODE ACTIVE
+  // ===================================================
+
+  if (accidentMode)
+  {
+
+    // Continuously maintain full brightness
+
+    setLights(255);
+
+
+    currentBrightness =
+      100;
+
+
+    // Periodic Firebase update
+
+    if (
+      millis() -
+      lastFirebaseUpdate >=
+      firebaseUpdateInterval
+    )
+    {
+
+      lastFirebaseUpdate =
+        millis();
+
+
+      saveLiveData();
+    }
+
+
+    delay(10);
+
+    return;
+  }
+
+
+  // ===================================================
+  // READ IR SENSORS
+  // ===================================================
+
+  int ir1 =
+    digitalRead(
+      IR1_PIN
+    );
+
+
+  int ir2 =
+    digitalRead(
+      IR2_PIN
+    );
+
+
+  // Most IR modules:
+  // LOW = object detected
+
+  bool detect1 =
+    (ir1 == LOW);
+
+
+  bool detect2 =
+    (ir2 == LOW);
+
+
+  // ===================================================
+  // PERIODIC LIVE FIREBASE UPDATE
+  // ===================================================
+
+  if (
+    millis() -
+    lastFirebaseUpdate >=
+    firebaseUpdateInterval
+  )
+  {
+
+    lastFirebaseUpdate =
+      millis();
+
+
+    saveLiveData();
+  }
+
+
+  // ===================================================
+  // IR SENSOR 1
+  // ===================================================
+
+  if (
+    detect1 &&
+    !sensor1Triggered
+  )
+  {
+
+    sensor1Time =
+      millis();
+
+
+    sensor1Triggered =
+      true;
+
+
+    Serial.println();
+    Serial.println(
+      "----------------------------------------"
+    );
+
+    Serial.println(
+      "IR SENSOR 1 -> VEHICLE DETECTED"
+    );
+
+
+    Serial.print(
+      "Sensor 1 Time: "
+    );
+
+    Serial.print(
+      sensor1Time
+    );
+
+    Serial.println(
+      " ms"
+    );
+
+
+    // Firebase
+
+    Firebase.RTDB.setInt(
+      &fbdo,
+      "/street_light/live/ir1",
+      ir1
+    );
+
+
+    Firebase.RTDB.setBool(
+      &fbdo,
+      "/street_light/live/vehicle_detected",
+      true
+    );
+
+
+    Firebase.RTDB.setString(
+      &fbdo,
+      "/street_light/live/status",
+      "SENSOR_1_DETECTED"
+    );
+  }
+
+
+  // ===================================================
+  // IR SENSOR 2
+  // ===================================================
+
+  if (
+    detect2 &&
+    sensor1Triggered &&
+    !sensor2Triggered
+  )
+  {
+
+    sensor2Time =
+      millis();
+
+
+    sensor2Triggered =
+      true;
+
+
+    // =================================================
+    // CALCULATE TIME
+    // =================================================
+
+    currentTimeDifference =
+      sensor2Time -
+      sensor1Time;
+
+
+    Serial.println();
+
+    Serial.println(
+      "IR SENSOR 2 -> VEHICLE DETECTED"
+    );
+
+
+    Serial.print(
+      "Time Difference: "
+    );
+
+    Serial.print(
+      currentTimeDifference
+    );
+
+    Serial.println(
+      " ms"
+    );
+
+
+    if (
+      currentTimeDifference > 0
+    )
+    {
+
+      // ===============================================
+      // SPEED CALCULATION
+      // ===============================================
+
+      float timeSeconds =
+        currentTimeDifference /
+        1000.0;
+
+
+      currentSpeedMS =
+        sensorDistance /
+        timeSeconds;
+
+
+      currentSpeedKMH =
+        currentSpeedMS *
+        3.6;
+
+
+      // ===============================================
+      // SPEED BASED BRIGHTNESS
+      // ===============================================
+
+      int pwmBrightness;
+
+
+      if (
+        currentSpeedKMH <= 5
+      )
+      {
+        pwmBrightness = 77;
+
+        currentBrightness =
+          30;
+      }
+
+
+      else if (
+        currentSpeedKMH <= 10
+      )
+      {
+        pwmBrightness = 128;
+
+        currentBrightness =
+          50;
+      }
+
+
+      else if (
+        currentSpeedKMH <= 20
+      )
+      {
+        pwmBrightness = 179;
+
+        currentBrightness =
+          70;
+      }
+
+
+      else if (
+        currentSpeedKMH <= 30
+      )
+      {
+        pwmBrightness = 217;
+
+        currentBrightness =
+          85;
+      }
+
+
+      else
+      {
+        pwmBrightness = 255;
+
+        currentBrightness =
+          100;
+      }
+
+
+      // ===============================================
+      // SET LIGHTS
+      // ===============================================
+
+      setLights(
+        pwmBrightness
+      );
+
+
+      // ===============================================
+      // SERIAL MONITOR
+      // ===============================================
+
+      Serial.println();
+
+      Serial.println(
+        "========================================"
+      );
+
+      Serial.println(
+        " VEHICLE DATA"
+      );
+
+      Serial.println(
+        "========================================"
+      );
+
+
+      Serial.print(
+        "Distance       : "
+      );
+
+      Serial.print(
+        sensorDistance
+      );
+
+      Serial.println(
+        " m"
+      );
+
+
+      Serial.print(
+        "Time Difference: "
+      );
+
+      Serial.print(
+        currentTimeDifference
+      );
+
+      Serial.println(
+        " ms"
+      );
+
+
+      Serial.print(
+        "Speed          : "
+      );
+
+      Serial.print(
+        currentSpeedMS,
+        2
+      );
+
+      Serial.println(
+        " m/s"
+      );
+
+
+      Serial.print(
+        "Speed          : "
+      );
+
+      Serial.print(
+        currentSpeedKMH,
+        2
+      );
+
+      Serial.println(
+        " km/h"
+      );
+
+
+      Serial.print(
+        "Brightness     : "
+      );
+
+      Serial.print(
+        currentBrightness
+      );
+
+      Serial.println(
+        "%"
+      );
+
+
+      Serial.println(
+        "========================================"
+      );
+
+
+      // ===============================================
+      // SAVE VEHICLE HISTORY
+      // ===============================================
+
+      saveVehicleHistory();
+
+
+      // ===============================================
+      // UPDATE LIVE DATA
+      // ===============================================
+
+      saveLiveData();
+
+
+      // ===============================================
+      // BUZZER
+      // ===============================================
+
+      beepBuzzer(200);
+
+
+      // ===============================================
+      // LIGHT ACTIVE
+      // ===============================================
+
+      delay(2000);
+
+
+      // ===============================================
+      // TURN LIGHTS OFF
+      // ===============================================
+
+      setLights(0);
+
+      currentBrightness =
+        0;
+
+
+      // ===============================================
+      // FIREBASE AFTER VEHICLE
+      // ===============================================
+
+      Firebase.RTDB.setInt(
+        &fbdo,
+        "/street_light/live/brightness",
+        0
+      );
+
+
+      Firebase.RTDB.setBool(
+        &fbdo,
+        "/street_light/live/vehicle_detected",
+        false
+      );
+
+
+      Firebase.RTDB.setString(
+        &fbdo,
+        "/street_light/live/status",
+        "WAITING"
+      );
+
+
+      Serial.println();
+
+      Serial.println(
+        "Vehicle passed"
+      );
+
+      Serial.println(
+        "Lights OFF"
+      );
+    }
+
+
+    // =================================================
+    // RESET
+    // =================================================
+
+    sensor1Triggered =
+      false;
+
+    sensor2Triggered =
+      false;
+  }
+
+
+  delay(5);
+}
